@@ -1,14 +1,17 @@
 import os
 import telebot
-from replit import db
 import re
 from functions import start_of_week, barchart
-  
+from pymongo import MongoClient
 
 #Initiate bot
 API_KEY = os.environ['API_KEY']
 bot = telebot.TeleBot(API_KEY)
 
+#Connect to MongoDB server
+cluster = "mongodb+srv://nadz94:Gangster123@projects.mb1ub5c.mongodb.net/?retryWrites=true&w=majority"
+client = MongoClient(cluster)
+db = client.Strand.GymTracker
 
 ###############
 #Start command#
@@ -52,42 +55,50 @@ def send_help_message(msg):
 #######################
 @bot.message_handler(commands=["addcount"])
 def add_count(msg):
+
+  week_start = start_of_week(msg.date)
+  
   # Print for debugging purpose
   print('name: ', msg.from_user.first_name, '\n w\c: ',
-        start_of_week(msg.date), '\n count: ', msg.text[-1], '\n chat type: ',
+        week_start, '\n count: ', msg.text[-1], '\n chat type: ',
         msg.chat.type)
 
-  # Unique key for each week for each person
-  msg_key = "(" + msg.from_user.first_name + "," + start_of_week(
-    msg.date) + ")"
-
   # Extract count from message
-  count = msg.text[-1]
-
-  # Check if value is double digits
-  if re.match(r'\d', msg.text[-2]):
-    bot.reply_to(msg,"single digit brev")
+  try:
+    count = msg.text.split(" ")[1]
     
-  # Checking if count already exists in database
-  elif msg_key in db.keys():
-    bot.reply_to(msg, "You have already submitted a count for this week")
-
-  else:
-    """if /addcount function is called without specifying a number, don't add to database"""
-    # Check if last character is a number, if so push to DB
-    if re.match(r'\d', count):
-      # Check if count is between 0 and 7
-      if int(count) not in range(0, 8):
+    if not count:
+      bot.reply_to(msg,"You did not specify a number")
+  
+    # Check if value is within range 0-7
+    elif re.match(r"^[0-9]+$",count):
+      if int(count) not in range(0,8):
         bot.reply_to(msg, "There are only 7 days in a week you donut")
+        
+      # Checking if count already exists in database
+      elif db.find_one({"WeekStarting":week_start,"User_id":msg.from_user.id}):
+        bot.reply_to(msg, "You have already submitted a count for this week")
+        
+
       else:
-        db[msg_key] = count
+        db.insert_one({"WeekStarting":week_start,
+                       "DateSubmitted":msg.date,
+                       "User_id":msg.from_user.id,
+                       "Username":msg.from_user.username,
+                       "Name":msg.from_user.first_name,
+                       "Count":count})
+        
         bot.reply_to(
           msg, """The following count has been added:
         name: %s, 
         w\c: %s, 
         count: %s
-        """ % (msg.from_user.first_name, start_of_week(msg.date), count))
+        """ % (msg.from_user.first_name, week_start, count))
+
     else:
+      bot.reply_to(msg,"You did not specify a number")
+    
+  except IndexError:
       bot.reply_to(msg, "You did not specify a number")
 
 
@@ -96,25 +107,26 @@ def add_count(msg):
 ##########################
 @bot.message_handler(commands=["updatecount"])
 def update_count(msg):
-  # Checking for double digits
-  if re.match(r'\d', msg.text[-2]):
-    bot.reply_to(msg, "there are only 7 days in a week you donut")
 
-  else:
-    if re.match(r'\d', msg.text[-1]) and int(msg.text[-1]) in range(0, 8):
-      # Finding database entries for specific user
-      msg_key = "(" + msg.from_user.first_name + "," + start_of_week(
-        msg.date) + ")"
-      # drop the entry
-      try:
-        del db[msg_key]
-      except KeyError:
-        pass
-      # add new entry
-      add_count(msg)
+  try:
+    count = msg.text.split(" ")[1]
   
-    else:
+    # Checking for count
+    if not count:
       bot.reply_to(msg, "You did not specify a number")
+
+    elif re.match(r"^[0-9]+$",count):
+      if int(count) not in range(0,8):
+        bot.reply_to(msg, "There are only 7 days in a week you donut")
+
+      else:
+        db.update_one({"WeekStarting":start_of_week(msg.date),"User_id":msg.from_user.id},
+                      {"$set": {"Count":count}})
+        
+        bot.reply_to(msg, f"Your count has been updated to: {count}")
+        
+  except IndexError:
+    bot.reply_to(msg, "You did not specify a number")
   
 
 #######################################
@@ -123,25 +135,27 @@ def update_count(msg):
 @bot.message_handler(commands=["mytotal"])
 def return_year_total(msg):
   # Finding database entries for specific user
-  users_counts = [
-    int(db[k]) for k in db if msg.from_user.first_name in k
-  ]
-  bot.reply_to(msg, sum(users_counts))
+  all_entries = list(db.find({"User_id":msg.from_user.id}))
 
+  total_count = sum([int(x['Count']) for x in all_entries])
 
+  bot.reply_to(msg, f"Your overall total attendace is: {total_count}")
+
+  
 ###########################
 #Return count for the week#
 ###########################
 @bot.message_handler(commands=["myweeklycount"])
 def return_weekly_count(msg):
   # Finding database entry for specific user
-  user_key = "(" + msg.from_user.first_name + "," + start_of_week(
-    msg.date) + ")"
+  week_start = start_of_week(msg.date)
+  
   try:
-    bot.reply_to(msg, db[user_key])
+    count = db.find_one({"WeekStarting":week_start,"User_id":msg.from_user.id})["Count"]
+    bot.reply_to(msg, f"Your total for this week is: {count}")
 
   # Otherwise return nothing
-  except:
+  except TypeError:
     bot.reply_to(msg, "You have not submitted a count for this week")
 
 
@@ -151,11 +165,8 @@ def return_weekly_count(msg):
 @bot.message_handler(commands=["weeklyview"])
 def return_specified_week_count(msg):
 
-  # Finding database entries for specified date
-  name = msg.from_user.first_name
-
   # Generate graph
-  barchart(name,db)
+  barchart(msg,db)
 
   # Send image of graph
   bot.send_photo( msg.chat.id, open("chart.png", "rb") )
